@@ -1,0 +1,8 @@
+# Conda / Miniconda installers
+Miniconda*.sh
+Anaconda*.sh
+
+# Conda environments
+.env
+.venv
+conda/

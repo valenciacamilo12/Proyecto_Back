@@ -17,3 +17,4 @@ aiohttp>=3.9.0
 python-multipart==0.0.9
 aiohttp==3.10.11
 azure-storage-blob==12.22.0
+motor>=3.3.0

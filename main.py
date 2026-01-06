@@ -2,11 +2,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
-
 from blob_storage import AzureBlobStorageClient
 from db.mongo import connect_to_mongo, close_mongo_connection, mongo
 from repositories.pdf_repository import PdfRepository
 from services.pdf_service import PdfService
+import uuid
+from pydantic import BaseModel
 
 
 blob_client = AzureBlobStorageClient()
@@ -38,7 +39,7 @@ def get_pdf_service(repo: PdfRepository = Depends(get_pdf_repo)) -> PdfService:
 # -------------------------
 @app.get("/")
 async def read_root():
-    return {"Hello": "World IA!!!"}
+    return {"Hello": "World Back!"}
 
 @app.post("/storage/pdf")
 async def upload_pdf_to_blob(
@@ -71,3 +72,19 @@ async def upload_pdf_to_blob(
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error subiendo a Blob o guardando en Mongo: {e}")
+
+
+# -----------------------------
+# MODELO RESPONSE
+# -----------------------------
+class GenerateIdCargaResponse(BaseModel):
+    id_carga: str
+
+
+# -----------------------------
+# ENDPOINT GENERAR ID CARGA
+# -----------------------------
+@app.get("/dashboard/id-carga", response_model=GenerateIdCargaResponse)
+async def generate_id_carga():
+    id_carga = f"UPL-{uuid.uuid4().hex[:8]}"
+    return GenerateIdCargaResponse(id_carga=id_carga)

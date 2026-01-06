@@ -2,11 +2,16 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo import ASCENDING
 from bson import ObjectId
+
 
 class PdfRepository:
     def __init__(self, db: AsyncIOMotorDatabase):
         self._col = db.get_collection("pdf_uploads")
+
+    async def ensure_indexes(self) -> None:
+        await self._col.create_index([("id_carga", ASCENDING)], unique=True)
 
     async def create_upload_record(self, doc: Dict[str, Any]) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
@@ -17,23 +22,9 @@ class PdfRepository:
         created = await self._col.find_one({"_id": result.inserted_id})
         return self._serialize(created)
 
-    async def update_status(self, doc_id: str, status: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        update: Dict[str, Any] = {
-            "$set": {
-                "status": status,
-                "updated_at": datetime.now(timezone.utc),
-            }
-        }
-        if extra:
-            update["$set"].update(extra)
-
-        _id = ObjectId(doc_id)
-        await self._col.update_one({"_id": _id}, update)
-        updated = await self._col.find_one({"_id": _id})
-        return self._serialize(updated)
-
-    def _serialize(self, doc: Dict[str, Any] | None) -> Dict[str, Any]:
+    def _serialize(self, doc: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if not doc:
             return {}
-        doc["_id"] = str(doc["_id"])
+        if "_id" in doc and isinstance(doc["_id"], ObjectId):
+            doc["_id"] = str(doc["_id"])
         return doc

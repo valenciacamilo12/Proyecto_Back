@@ -1,7 +1,8 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
-
 from blob_storage import AzureBlobStorageClient
+import uuid
+from pydantic import BaseModel
 
 app = FastAPI()
 
@@ -28,3 +29,18 @@ async def upload_pdf_to_blob(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error subiendo a Blob: {e}")
+    
+# -----------------------------
+# MODELO RESPONSE
+# -----------------------------
+class GenerateIdCargaResponse(BaseModel):
+    id_carga: str
+
+
+# -----------------------------
+# ENDPOINT GENERAR ID CARGA
+# -----------------------------
+@app.get("/dashboard/id-carga", response_model=GenerateIdCargaResponse)
+async def generate_id_carga():
+    id_carga = f"UPL-{uuid.uuid4().hex[:8]}"
+    return GenerateIdCargaResponse(id_carga=id_carga)

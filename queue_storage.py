@@ -13,7 +13,7 @@ class AzureQueueStorageClient:
         connection_string: Optional[str] = None,
         queue_name: Optional[str] = None,
     ) -> None:
-        self.connection_string = "DefaultEndpointsProtocol=https;AccountName=cuentatesis;AccountKey=iyJbTjmfhvmCdzYy2Tnb7rXp88NWk1sephqm91UV1qPlk1dW7IOMEthHTxPyi5fQA8gQgZc6EVpy+AStbxmwwg==;EndpointSuffix=core.windows.net"
+        self.connection_string = connection_string or os.getenv("AZURE_STORAGE_CONNECTION_STRING")
         self.queue_name = queue_name or os.getenv("AZURE_STORAGE_QUEUE_NAME", "documento-nuevo")
 
         if not self.connection_string:

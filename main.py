@@ -1,10 +1,11 @@
 import logging
 import os
 import uuid
+import io
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional, Literal
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request, Path
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 from blob_storage import AzureBlobStorageClient
@@ -75,7 +76,9 @@ class GenerateIdCargaResponse(BaseModel):
     id_carga: str
 
 
-AllowedStatus = Literal["PROCESSED", "ERROR"]
+# ✅ IMPORTANTE: ahora incluimos UPLOADED
+AllowedStatus = Literal["UPLOADED", "PROCESSED", "ERROR"]
+
 
 class UpdateStatusRequest(BaseModel):
     status: AllowedStatus = Field(..., description="Nuevo estado del registro")
@@ -125,6 +128,9 @@ async def generate_id_carga():
     return GenerateIdCargaResponse(id_carga=id_carga)
 
 
+# -------------------------
+# Upload PDF (Blob + Mongo + Queue)
+# -------------------------
 @app.post("/storage/pdf")
 async def upload_pdf_to_blob(
     file: UploadFile = File(...),
@@ -207,3 +213,107 @@ async def update_status(
         raise HTTPException(status_code=404, detail=f"No existe id_carga={id_carga}")
 
     return JSONResponse(status_code=200, content=jsonable_encoder(updated))
+
+
+# ----------------------------------------------------
+# ✅ Endpoint que te faltaba: listado para Dashboard
+# ----------------------------------------------------
+@app.get("/dashboard/cargas")
+async def list_dashboard_cargas(
+    repo: PdfRepository = Depends(get_pdf_repo),
+):
+    """
+    Devuelve una fila por id_carga (último estado), para pintar el Dashboard.
+    """
+    cargas = await repo.list_cargas()
+
+    response = []
+    for c in cargas:
+        status = (c.get("status") or "UNKNOWN").upper()
+        response.append(
+            {
+                "id_carga": c.get("id_carga"),
+                "updated_at": c.get("updated_at"),
+                "status": status,
+                "error_message": c.get("error_message"),
+            }
+        )
+
+    return response
+
+
+# ----------------------------------------------------
+# Reintentar carga: re-publica en la cola
+# ----------------------------------------------------
+@app.post("/dashboard/cargas/{id_carga}/retry")
+async def retry_carga(
+    id_carga: str = Path(..., description="Identificador de la carga (UPL-xxxx)"),
+    repo: PdfRepository = Depends(get_pdf_repo),
+):
+    if queue_client is None:
+        raise HTTPException(status_code=500, detail="Queue client no inicializado")
+
+    doc = await repo.find_latest_by_id_carga(id_carga)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"No existe id_carga={id_carga}")
+
+    blob = doc.get("blob") or {}
+    blob_url = blob.get("blob_url") or blob.get("url") or doc.get("blob_url")
+    if not blob_url:
+        raise HTTPException(status_code=400, detail="La carga no tiene blob_url para reintentar")
+
+    trace_id = str(uuid.uuid4())
+    queue_payload = await queue_client.publish_document_event(
+        id_carga=id_carga,
+        blob_url=blob_url,
+        content_type="application/pdf",
+        trace_id=trace_id,
+        extra={
+            "container": blob.get("container"),
+            "blobName": blob.get("blob_name") or blob.get("blobName"),
+            "filename": doc.get("filename"),
+        },
+    )
+
+    # Marcar como UPLOADED de nuevo (reintento)
+    updated = await repo.update_status_by_id_carga(
+        id_carga=id_carga,
+        status="UPLOADED",
+        comment="Reintento solicitado desde Dashboard",
+    )
+
+    return JSONResponse(
+        status_code=200,
+        content=jsonable_encoder(
+            {
+                "ok": True,
+                "id_carga": id_carga,
+                "queue": queue_payload,
+                "mongo": updated,
+            }
+        ),
+    )
+
+
+# ----------------------------------------------------
+# Descargar Excel (placeholder)
+# ----------------------------------------------------
+@app.get("/dashboard/cargas/{id_carga}/excel")
+async def download_excel(
+    id_carga: str = Path(...),
+    repo: PdfRepository = Depends(get_pdf_repo),
+):
+    doc = await repo.find_latest_by_id_carga(id_carga)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"No existe id_carga={id_carga}")
+
+    if (doc.get("status") or "").upper() != "PROCESSED":
+        raise HTTPException(status_code=409, detail="La carga aún no está PROCESSED")
+
+    excel_blob_url = doc.get("excel_blob_url")
+    if not excel_blob_url:
+        raise HTTPException(status_code=404, detail="No hay excel_blob_url asociado a esta carga")
+
+    # Aquí debes implementar descarga real desde Blob.
+    # Dejo explícito para que no “parezca que descargó” sin hacerlo.
+    raise HTTPException(status_code=501, detail="Falta implementar descarga desde Blob (excel_blob_url)")

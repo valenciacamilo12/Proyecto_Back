@@ -20,3 +20,4 @@ azure-storage-blob==12.22.0
 motor>=3.6.0
 pymongo==4.9.2 
 dnspython==2.6.1
+azure-storage-queue==12.14.0

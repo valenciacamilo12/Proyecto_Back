@@ -13,6 +13,10 @@ from queue_storage import AzureQueueStorageClient
 from db.mongo import connect_to_mongo, close_mongo_connection, mongo
 from repositories.pdf_repository import PdfRepository
 from services.pdf_service import PdfService
+import io
+from datetime import datetime
+from fastapi.responses import StreamingResponse
+from openpyxl import Workbook
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("api")
@@ -306,4 +310,61 @@ async def retry_carga(
     return JSONResponse(
         status_code=200,
         content=jsonable_encoder({"ok": True, "id_carga": id_carga, "queue": queue_payload, "mongo": updated}),
+    )
+
+
+@app.get("/dashboard/extractions/excel")
+async def download_extractions_excel(repo: PdfRepository = Depends(get_pdf_repo)):
+    rows = await repo.list_extractions_for_excel()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Extracciones"
+
+    headers = [
+        "idCarga",
+        "file",
+        "Radicado",
+        "Demandado",
+        "Demandante",
+        "Fecha De Recibido",
+        "Fecha De Sentencia",
+        "Tipo De Proceso",
+    ]
+    ws.append(headers)
+
+    for r in rows:
+        ws.append(
+            [
+                r.get("id_carga", ""),
+                r.get("file", ""),
+                r.get("radicado", ""),
+                r.get("demandado", ""),
+                r.get("demandante", ""),
+                r.get("fecha_de_recibido", ""),
+                r.get("fecha_de_sentencia", ""),
+                r.get("tipo_de_proceso", ""),
+            ]
+        )
+
+    for col in ws.columns:
+        max_len = 0
+        col_letter = col[0].column_letter
+        for cell in col:
+            v = "" if cell.value is None else str(cell.value)
+            max_len = max(max_len, len(v))
+        ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    filename = f"extracciones_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
     )

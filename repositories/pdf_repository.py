@@ -23,7 +23,7 @@ class PdfRepository:
                 name="id_carga_unique",
             )
         except OperationFailure as e:
-            if getattr(e, "code", None) == 85:  # IndexOptionsConflict
+            if getattr(e, "code", None) == 85:
                 self._log.info("[INDEX] id_carga index ya existe, se reutiliza")
             else:
                 raise
@@ -32,8 +32,6 @@ class PdfRepository:
         now = datetime.now(timezone.utc)
         doc.setdefault("created_at", now)
         doc.setdefault("updated_at", now)
-
-        # Inicializa lista de extracciones (por orden / por documento)
         doc.setdefault("extractions", [])
 
         result = await self._col.insert_one(doc)
@@ -58,10 +56,8 @@ class PdfRepository:
             },
             {"$sort": {"updated_at": -1}},
         ]
-
         cursor = self._col.aggregate(pipeline)
-        docs = [self._serialize(doc) async for doc in cursor]
-        return docs
+        return [self._serialize(doc) async for doc in cursor]
 
     async def find_latest_by_id_carga(self, id_carga: str) -> Optional[Dict[str, Any]]:
         doc = await self._col.find_one({"id_carga": id_carga}, sort=[("updated_at", -1)])
@@ -76,52 +72,19 @@ class PdfRepository:
         extracted: Optional[Dict[str, Any]] = None,
         trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        - ERROR     -> set error_message y LIMPIA extractions[]
-        - PROCESSED -> unset error_message y (si viene extracted) push a extractions[]
-        - UPLOADED  -> estado normal
-
-        Guarda lista ordenada en Mongo:
-          extractions: [
-            { trace_id, created_at, ...campos extraidos... },
-            ...
-          ]
-        """
-        self._log.info(
-            f"[STATUS] id_carga={id_carga} status={status} comment={comment} trace_id={trace_id}"
-        )
-
         now = datetime.now(timezone.utc)
-
-        update: Dict[str, Any] = {
-            "$set": {
-                "status": status,
-                "updated_at": now,
-            }
-        }
+        update: Dict[str, Any] = {"$set": {"status": status, "updated_at": now}}
 
         if status == "ERROR":
             update["$set"]["error_message"] = comment
-
-            # ✅ Ajuste: en ERROR limpiamos cualquier extracción previa
             update["$set"]["extractions"] = []
-
-            # (Opcional) Si en algún momento se guardó trace_id en raíz y quieres limpiarlo:
-            # update.setdefault("$unset", {})["trace_id"] = ""
 
         elif status == "PROCESSED":
             update["$unset"] = {"error_message": ""}
-
-            # Si el microservicio IA manda extracción, la guardamos como entrada en lista
             if extracted:
                 entry = dict(extracted)
                 entry["trace_id"] = trace_id
                 entry["created_at"] = now
-
-                # Garantiza que exista el arreglo (solo aplica si usas upsert=True; aquí no lo usas)
-                update.setdefault("$setOnInsert", {})["extractions"] = []
-
-                # Guardar "una fila por documento" en la lista, en orden de llegada
                 update.setdefault("$push", {})["extractions"] = entry
 
         updated = await self._col.find_one_and_update(
@@ -129,8 +92,44 @@ class PdfRepository:
             update,
             return_document=ReturnDocument.AFTER,
         )
-
         return self._serialize(updated)
+
+    # ---------------------------------------------------------
+    # ✅ NUEVO: filas para Excel (1 fila por documento / id_carga)
+    # ---------------------------------------------------------
+    async def list_extractions_for_excel(self) -> List[Dict[str, Any]]:
+        """
+        Retorna filas normalizadas para Excel.
+        - Solo documentos PROCESSED con al menos 1 extracción.
+        - Toma la ÚLTIMA extracción (si hay varias).
+        - Incluye id_carga (para la columna idCarga del Excel).
+        """
+        query = {"status": "PROCESSED", "extractions.0": {"$exists": True}}
+        projection = {"id_carga": 1, "filename": 1, "updated_at": 1, "extractions": 1}
+
+        cursor = self._col.find(query, projection=projection).sort("updated_at", -1)
+
+        rows: List[Dict[str, Any]] = []
+        async for doc in cursor:
+            extractions = doc.get("extractions") or []
+            if not extractions:
+                continue
+
+            last = extractions[-1]  # última extracción
+            rows.append(
+                {
+                    "id_carga": doc.get("id_carga") or "",
+                    "file": last.get("file") or doc.get("filename") or "",
+                    "radicado": last.get("radicado") or "",
+                    "demandado": last.get("demandado") or "",
+                    "demandante": last.get("demandante") or "",
+                    "fecha_de_recibido": last.get("fecha_de_recibido") or "",
+                    "fecha_de_sentencia": last.get("fecha_de_sentencia") or "",
+                    "tipo_de_proceso": last.get("tipo_de_proceso") or "",
+                }
+            )
+
+        return rows
 
     def _serialize(self, doc: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if not doc:

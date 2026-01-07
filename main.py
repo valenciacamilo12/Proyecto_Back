@@ -1,13 +1,13 @@
 import logging
 import os
 import uuid
-import io
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional, Literal
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request, Path
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from blob_storage import AzureBlobStorageClient
 from queue_storage import AzureQueueStorageClient
 from db.mongo import connect_to_mongo, close_mongo_connection, mongo
@@ -76,13 +76,38 @@ class GenerateIdCargaResponse(BaseModel):
     id_carga: str
 
 
-# ✅ IMPORTANTE: ahora incluimos UPLOADED
 AllowedStatus = Literal["UPLOADED", "PROCESSED", "ERROR"]
+
+
+class ExtractionPayload(BaseModel):
+    # Campos que dijiste que extrae el agente
+    file: Optional[str] = Field(None, description="Nombre de archivo (si aplica)")
+    radicado: str = Field(..., description="Radicado")
+    demandado: str = Field(..., description="Demandado")
+    demandante: str = Field(..., description="Demandante")
+    fecha_de_recibido: Optional[str] = Field(None, description="Fecha de recibido (string tal como venga del agente)")
+    fecha_de_sentencia: Optional[str] = Field(None, description="Fecha de sentencia (string tal como venga del agente)")
+    tipo_de_proceso: str = Field(..., description="Tipo de proceso")
 
 
 class UpdateStatusRequest(BaseModel):
     status: AllowedStatus = Field(..., description="Nuevo estado del registro")
     comment: str = Field(..., min_length=1, description="Comentario simple (éxito o error)")
+
+    # NUEVO: datos del agente cuando PROCESSED
+    extracted: Optional[ExtractionPayload] = Field(
+        None,
+        description="Datos extraídos por el agente (obligatorio cuando status=PROCESSED)",
+    )
+
+    # Opcional pero muy útil para trazabilidad/idempotencia
+    trace_id: Optional[str] = Field(None, description="traceId del procesamiento en IA")
+
+    @model_validator(mode="after")
+    def validate_extracted_when_processed(self):
+        if self.status == "PROCESSED" and self.extracted is None:
+            raise ValueError("Cuando status=PROCESSED, debes enviar extracted.")
+        return self
 
 
 # -------------------------
@@ -180,22 +205,19 @@ async def upload_pdf_to_blob(
 
         return JSONResponse(
             status_code=201,
-            content=jsonable_encoder(
-                {
-                    "blob": blob_result,
-                    "mongo": db_record,
-                    "queue": queue_payload,
-                }
-            ),
+            content=jsonable_encoder({"blob": blob_result, "mongo": db_record, "queue": queue_payload}),
         )
 
     except Exception as e:
         logger.exception("[UPLOAD] FALLO")
-        raise HTTPException(status_code=500, detail=f"Error subiendo a Blob, guardando en Mongo o enviando a cola: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error subiendo a Blob, guardando en Mongo o enviando a cola: {e}",
+        )
 
 
 # ----------------------------------------------------
-# NUEVO: Endpoint para que el microservicio IA actualice estado
+# Endpoint para que el microservicio IA actualice estado + guarde extracción
 # ----------------------------------------------------
 @app.patch("/cargas/{id_carga}/status")
 async def update_status(
@@ -206,7 +228,9 @@ async def update_status(
     updated = await repo.update_status_by_id_carga(
         id_carga=id_carga,
         status=payload.status,
-        comment=payload.comment,  # solo para log/retorno si así lo decides
+        comment=payload.comment,
+        extracted=payload.extracted.model_dump() if payload.extracted else None,
+        trace_id=payload.trace_id,
     )
 
     if not updated:
@@ -216,15 +240,10 @@ async def update_status(
 
 
 # ----------------------------------------------------
-# ✅ Endpoint que te faltaba: listado para Dashboard
+# Dashboard: listado
 # ----------------------------------------------------
 @app.get("/dashboard/cargas")
-async def list_dashboard_cargas(
-    repo: PdfRepository = Depends(get_pdf_repo),
-):
-    """
-    Devuelve una fila por id_carga (último estado), para pintar el Dashboard.
-    """
+async def list_dashboard_cargas(repo: PdfRepository = Depends(get_pdf_repo)):
     cargas = await repo.list_cargas()
 
     response = []
@@ -236,6 +255,7 @@ async def list_dashboard_cargas(
                 "updated_at": c.get("updated_at"),
                 "status": status,
                 "error_message": c.get("error_message"),
+                "extractions_count": len(c.get("extractions") or []),
             }
         )
 
@@ -275,45 +295,15 @@ async def retry_carga(
         },
     )
 
-    # Marcar como UPLOADED de nuevo (reintento)
     updated = await repo.update_status_by_id_carga(
         id_carga=id_carga,
         status="UPLOADED",
         comment="Reintento solicitado desde Dashboard",
+        extracted=None,
+        trace_id=trace_id,
     )
 
     return JSONResponse(
         status_code=200,
-        content=jsonable_encoder(
-            {
-                "ok": True,
-                "id_carga": id_carga,
-                "queue": queue_payload,
-                "mongo": updated,
-            }
-        ),
+        content=jsonable_encoder({"ok": True, "id_carga": id_carga, "queue": queue_payload, "mongo": updated}),
     )
-
-
-# ----------------------------------------------------
-# Descargar Excel (placeholder)
-# ----------------------------------------------------
-@app.get("/dashboard/cargas/{id_carga}/excel")
-async def download_excel(
-    id_carga: str = Path(...),
-    repo: PdfRepository = Depends(get_pdf_repo),
-):
-    doc = await repo.find_latest_by_id_carga(id_carga)
-    if not doc:
-        raise HTTPException(status_code=404, detail=f"No existe id_carga={id_carga}")
-
-    if (doc.get("status") or "").upper() != "PROCESSED":
-        raise HTTPException(status_code=409, detail="La carga aún no está PROCESSED")
-
-    excel_blob_url = doc.get("excel_blob_url")
-    if not excel_blob_url:
-        raise HTTPException(status_code=404, detail="No hay excel_blob_url asociado a esta carga")
-
-    # Aquí debes implementar descarga real desde Blob.
-    # Dejo explícito para que no “parezca que descargó” sin hacerlo.
-    raise HTTPException(status_code=501, detail="Falta implementar descarga desde Blob (excel_blob_url)")

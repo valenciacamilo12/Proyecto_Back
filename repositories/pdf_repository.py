@@ -1,11 +1,11 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from motor.motor_asyncio import AsyncIOMotorDatabase
-from pymongo import ASCENDING
-from pymongo.errors import OperationFailure
-from bson import ObjectId
 import logging
+from bson import ObjectId
+from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo import ASCENDING, ReturnDocument
+from pymongo.errors import OperationFailure
 
 
 class PdfRepository:
@@ -25,11 +25,22 @@ class PdfRepository:
                 name="id_carga_unique",
             )
         except OperationFailure as e:
-            # CosmosDB / Mongo API lanza conflicto si ya existe con otro nombre
             if getattr(e, "code", None) == 85:  # IndexOptionsConflict
                 self._log.info("[INDEX] id_carga index ya existe, se reutiliza")
             else:
                 raise
+
+    async def create_upload_record(self, doc: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Inserta el registro inicial de la carga (lo que usa PdfService.register_upload).
+        """
+        now = datetime.now(timezone.utc)
+        doc.setdefault("created_at", now)
+        doc.setdefault("updated_at", now)
+
+        result = await self._col.insert_one(doc)
+        created = await self._col.find_one({"_id": result.inserted_id})
+        return self._serialize(created)
 
     async def update_status_by_id_carga(
         self,
@@ -37,17 +48,14 @@ class PdfRepository:
         id_carga: str,
         status: str,
         comment: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """
         Actualiza el estado de una carga.
         - ERROR      -> guarda error_message = comment
         - PROCESSED  -> elimina error_message si existe
         El comment NO se persiste como campo independiente.
         """
-
-        self._log.info(
-            f"[STATUS] id_carga={id_carga} status={status} comment={comment}"
-        )
+        self._log.info(f"[STATUS] id_carga={id_carga} status={status} comment={comment}")
 
         update: Dict[str, Any] = {
             "$set": {
@@ -57,19 +65,15 @@ class PdfRepository:
         }
 
         if status == "ERROR":
-            # Persistimos el mensaje de error
             update["$set"]["error_message"] = comment
 
-        if status == "PROCESSED":
-            # Eliminamos cualquier error previo
-            update["$unset"] = {
-                "error_message": ""
-            }
+        elif status == "PROCESSED":
+            update["$unset"] = {"error_message": ""}
 
         updated = await self._col.find_one_and_update(
             {"id_carga": id_carga},
             update,
-            return_document=True,
+            return_document=ReturnDocument.AFTER,
         )
 
         return self._serialize(updated)

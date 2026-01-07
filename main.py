@@ -3,22 +3,11 @@ import os
 import uuid
 import io
 from contextlib import asynccontextmanager
-from typing import Literal
-
-from fastapi import (
-    FastAPI,
-    UploadFile,
-    File,
-    Form,
-    HTTPException,
-    Depends,
-    Request,
-    Path,
-)
+from typing import Any, Dict, Optional, Literal
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request, Path
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
-
 from blob_storage import AzureBlobStorageClient
 from queue_storage import AzureQueueStorageClient
 from db.mongo import connect_to_mongo, close_mongo_connection, mongo
@@ -125,7 +114,7 @@ async def debug_echo(request: Request):
 
 
 # -------------------------
-# Endpoints base
+# Endpoints
 # -------------------------
 @app.get("/")
 async def read_root():
@@ -191,7 +180,13 @@ async def upload_pdf_to_blob(
 
         return JSONResponse(
             status_code=201,
-            content=jsonable_encoder({"blob": blob_result, "mongo": db_record, "queue": queue_payload}),
+            content=jsonable_encoder(
+                {
+                    "blob": blob_result,
+                    "mongo": db_record,
+                    "queue": queue_payload,
+                }
+            ),
         )
 
     except Exception as e:
@@ -200,7 +195,7 @@ async def upload_pdf_to_blob(
 
 
 # ----------------------------------------------------
-# Endpoint para que el microservicio IA actualice estado
+# NUEVO: Endpoint para que el microservicio IA actualice estado
 # ----------------------------------------------------
 @app.patch("/cargas/{id_carga}/status")
 async def update_status(
@@ -211,7 +206,7 @@ async def update_status(
     updated = await repo.update_status_by_id_carga(
         id_carga=id_carga,
         status=payload.status,
-        comment=payload.comment,
+        comment=payload.comment,  # solo para log/retorno si así lo decides
     )
 
     if not updated:
